@@ -29,6 +29,23 @@ struct WatchProgress: Codable, Equatable {
     var finished: Bool
 }
 
+struct PlaybackCue: Equatable {
+    enum Kind: Equatable {
+        case play
+        case pause
+    }
+
+    var kind: Kind
+    var token: UUID
+
+    var symbol: String {
+        switch kind {
+        case .play: return "play.fill"
+        case .pause: return "pause.fill"
+        }
+    }
+}
+
 final class PlayerModel: ObservableObject {
     static weak var current: PlayerModel?
     static let skipSeconds: Double = 10
@@ -51,6 +68,7 @@ final class PlayerModel: ObservableObject {
     @Published var isScrubbing = false
     @Published var status: String?
     @Published var vlcMissing = false
+    @Published var playbackCue: PlaybackCue?
 
     let engine: VLCEngine?
     private var keyMonitor: Any?
@@ -76,6 +94,8 @@ final class PlayerModel: ObservableObject {
     private var scrubHoldUntil = Date.distantPast
     private var lastSeekSentAt = Date.distantPast
     private var lastSeekSent = -1.0
+    private var cueClear: DispatchWorkItem?
+    private var trustPlayingUntil = Date.distantPast
 
     private enum Keys {
         static let rate = "lumiere.rate"
@@ -242,18 +262,31 @@ final class PlayerModel: ObservableObject {
         }
     }
 
-    func togglePlay() {
+    func togglePlay(announce: Bool = true) {
         guard engine != nil else { return }
         if let currentIndex, !mediaStarted {
             play(index: currentIndex)
+            if announce { flashCue(.play) }
             return
         }
         if currentIndex == nil, let first = playlist.indices.first {
             play(index: first)
+            if announce { flashCue(.play) }
             return
         }
+        let willPlay = !isPlaying
+        isPlaying = willPlay
+        trustPlayingUntil = Date().addingTimeInterval(0.35)
         engine?.togglePause()
+        if announce { flashCue(willPlay ? .play : .pause) }
         pokeControls()
+    }
+
+    func playAdjacent(_ delta: Int) {
+        guard let currentIndex else { return }
+        let target = currentIndex + delta
+        guard playlist.indices.contains(target) else { return }
+        play(index: target)
     }
 
     func next() {
@@ -441,13 +474,34 @@ final class PlayerModel: ObservableObject {
     func setPictureInPicture(_ enabled: Bool) {
         guard enabled != pictureInPicture else { return }
         guard currentIndex != nil || !enabled else { return }
-        pictureInPicture = enabled
         if enabled {
-            PiPController.shared.show(model: self)
+            PiPController.shared.enter(model: self) { [weak self] in
+                self?.pictureInPicture = true
+                self?.pokeControls()
+            }
         } else {
-            PiPController.shared.close()
+            PiPController.shared.leave { [weak self] in
+                self?.pictureInPicture = false
+                self?.pokeControls()
+            }
         }
-        pokeControls()
+    }
+
+    func flashCue(_ kind: PlaybackCue.Kind) {
+        cueClear?.cancel()
+        let cue = PlaybackCue(kind: kind, token: UUID())
+        playbackCue = cue
+        let work = DispatchWorkItem { [weak self] in
+            guard self?.playbackCue?.token == cue.token else { return }
+            self?.playbackCue = nil
+        }
+        cueClear = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.34, execute: work)
+    }
+
+    func dismissCue() {
+        cueClear?.cancel()
+        playbackCue = nil
     }
 
     func notePictureInPictureClosed() {
@@ -702,10 +756,12 @@ final class PlayerModel: ObservableObject {
         if length > 0, abs(length - duration) > 0.2 {
             duration = length
         }
-        let playing = engine.isPlaying()
-        if playing != isPlaying {
-            isPlaying = playing
-            updateActivity()
+        if Date() >= trustPlayingUntil {
+            let playing = engine.isPlaying()
+            if playing != isPlaying {
+                isPlaying = playing
+                updateActivity()
+            }
         }
         let video = engine.hasVideo()
         if video != hasVideo {

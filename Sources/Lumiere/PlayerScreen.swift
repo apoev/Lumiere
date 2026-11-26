@@ -8,7 +8,6 @@ struct PlayerScreen: View {
     @State private var dropTargeted = false
     @State private var scrub = 0.0
     @State private var draggingTimeline = false
-    @State private var singleClick: DispatchWorkItem?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -53,18 +52,21 @@ struct PlayerScreen: View {
                     if !model.hasVideo && model.duration > 0 {
                         audioState
                     }
-                    Color.clear
-                        .contentShape(Rectangle())
-                        .onTapGesture(count: 2) {
-                            singleClick?.cancel()
+                    StageClicks(
+                        onSingle: {
+                            model.flashCue(model.isPlaying ? .pause : .play)
+                            model.togglePlay(announce: false)
+                        },
+                        onDouble: {
+                            // Первый щелчок уже переключил воспроизведение.
+                            model.dismissCue()
+                            model.togglePlay(announce: false)
                             model.toggleFullscreen()
                         }
-                        .onTapGesture(count: 1) {
-                            singleClick?.cancel()
-                            let work = DispatchWorkItem { model.togglePlay() }
-                            singleClick = work
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.22, execute: work)
-                        }
+                    )
+                    .padding(.top, 28)
+                    .padding(.bottom, 96)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
             if dropTargeted {
@@ -79,6 +81,10 @@ struct PlayerScreen: View {
             }
             if !model.vlcMissing && !model.pictureInPicture {
                 overlayChrome
+            }
+            if let cue = model.playbackCue, !model.pictureInPicture {
+                PlaybackCueOverlay(cue: cue)
+                    .id(cue.token)
             }
         }
         .onContinuousHover { phase in
@@ -158,10 +164,10 @@ struct PlayerScreen: View {
                     }
                 )
                 .disabled(model.duration <= 0)
-                Text(formatTime(model.duration))
+                Text(remainingTime)
                     .font(.system(size: 12, weight: .medium, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.55))
-                    .frame(width: 64, alignment: .trailing)
+                    .frame(width: 72, alignment: .trailing)
             }
             GeometryReader { geo in
             ScrollView(.horizontal, showsIndicators: false) {
@@ -471,6 +477,11 @@ struct PlayerScreen: View {
         guard model.duration > 0 else { return 0 }
         return min(1, max(0, model.currentTime / model.duration))
     }
+
+    private var remainingTime: String {
+        guard model.duration > 0 else { return "0:00" }
+        return "-" + formatTime(max(0, model.duration - model.currentTime))
+    }
 }
 
 struct PiPOverlay: View {
@@ -487,7 +498,9 @@ struct PiPOverlay: View {
         ZStack {
             Color.black
             VideoHost(model: model)
-            PiPDragSurface()
+            PiPDragSurface { inside in
+                pointerInside = inside
+            }
             if !model.hasVideo, model.currentIndex != nil {
                 Image(systemName: "waveform")
                     .font(.system(size: 28))
@@ -517,8 +530,11 @@ struct PiPOverlay: View {
             .opacity(showChrome ? 1 : 0)
             .allowsHitTesting(showChrome)
             .animation(.easeInOut(duration: 0.16), value: showChrome)
+            if let cue = model.playbackCue {
+                PlaybackCueOverlay(cue: cue)
+                    .id(cue.token)
+            }
         }
-        .onHover { pointerInside = $0 }
         .environment(\.colorScheme, .dark)
         .foregroundStyle(.white)
     }
@@ -549,6 +565,16 @@ struct PiPOverlay: View {
             .tint(Color.lumiereAccent)
             HStack(spacing: 4) {
                 Button {
+                    model.playAdjacent(-1)
+                } label: {
+                    Image(systemName: "backward.end.fill")
+                        .foregroundStyle(.white)
+                        .frame(width: 26, height: 26)
+                }
+                .buttonStyle(.plain)
+                .disabled((model.currentIndex ?? 0) == 0)
+                .help("Предыдущее видео")
+                Button {
                     model.togglePlay()
                 } label: {
                     Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
@@ -556,6 +582,16 @@ struct PiPOverlay: View {
                         .frame(width: 28, height: 26)
                 }
                 .buttonStyle(.plain)
+                Button {
+                    model.playAdjacent(1)
+                } label: {
+                    Image(systemName: "forward.end.fill")
+                        .foregroundStyle(.white)
+                        .frame(width: 26, height: 26)
+                }
+                .buttonStyle(.plain)
+                .disabled(model.currentIndex == nil || model.currentIndex == model.playlist.count - 1)
+                .help("Следующее видео")
                 Button {
                     model.seek(by: -PlayerModel.skipSeconds)
                 } label: {
@@ -611,6 +647,74 @@ struct PiPOverlay: View {
     private var fraction: Double {
         guard model.duration > 0 else { return 0 }
         return min(1, max(0, model.currentTime / model.duration))
+    }
+}
+
+private struct PlaybackCueOverlay: View {
+    var cue: PlaybackCue
+    @State private var expand = false
+    @State private var fade = false
+
+    var body: some View {
+        Image(systemName: cue.symbol)
+            .font(.system(size: 30, weight: .semibold))
+            .foregroundStyle(.white)
+            .offset(x: cue.kind == .play ? 2 : 0)
+            .frame(width: 74, height: 74)
+            .background(Circle().fill(Color.black.opacity(0.55)))
+            .scaleEffect(expand ? 1.55 : 0.82)
+            .opacity(fade ? 0 : 1)
+            .onAppear {
+                withAnimation(.linear(duration: 0.32)) {
+                    expand = true
+                }
+                withAnimation(.easeIn(duration: 0.2).delay(0.08)) {
+                    fade = true
+                }
+            }
+            .allowsHitTesting(false)
+    }
+}
+
+/// Щелчок обрабатывается сразу: жест SwiftUI ждёт, не будет ли это двойной клик.
+private struct StageClicks: NSViewRepresentable {
+    var onSingle: () -> Void
+    var onDouble: () -> Void
+
+    func makeNSView(context: Context) -> StageClickView {
+        let view = StageClickView()
+        view.onSingle = onSingle
+        view.onDouble = onDouble
+        return view
+    }
+
+    func updateNSView(_ view: StageClickView, context: Context) {
+        view.onSingle = onSingle
+        view.onDouble = onDouble
+    }
+}
+
+final class StageClickView: NSView {
+    var onSingle: (() -> Void)?
+    var onDouble: (() -> Void)?
+    private static var lastSingle = 0.0
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        bounds.contains(point) ? self : nil
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount >= 2 {
+            onDouble?()
+            return
+        }
+        let now = ProcessInfo.processInfo.systemUptime
+        // Повторная доставка того же щелчка не должна переключать воспроизведение несколько раз.
+        if now - Self.lastSingle < 0.28 { return }
+        Self.lastSingle = now
+        onSingle?()
     }
 }
 
