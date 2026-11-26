@@ -6,6 +6,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppSettings.shared.applyAppearance()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            AppUpdate.shared.check(interactive: false)
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -50,6 +53,11 @@ struct LumiereApp: App {
                     PlayerModel.current?.openFiles(replacing: false)
                 }
                 .keyboardShortcut("o", modifiers: [.command, .option])
+            }
+            CommandGroup(after: .appInfo) {
+                Button("Проверить обновления…") {
+                    AppUpdate.shared.check(interactive: true)
+                }
             }
             CommandGroup(after: .appSettings) {
                 Button("Плейлист") {
