@@ -1,0 +1,4 @@
+module Clibvlc [system] {
+    header "shim.h"
+    export *
+}

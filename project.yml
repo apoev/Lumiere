@@ -1,0 +1,36 @@
+# xcodegen: brew install xcodegen && xcodegen generate
+# На этой машине Xcode.app нет — рабочая сборка: ./Scripts/build.sh
+name: Lumiere
+options:
+  bundleIdPrefix: com.apoev
+  deploymentTarget:
+    macOS: "14.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    PRODUCT_NAME: Lumiere
+    GENERATE_INFOPLIST_FILE: NO
+    INFOPLIST_FILE: Info.plist
+    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGNING_ALLOWED: NO
+    ENABLE_HARDENED_RUNTIME: NO
+    LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks /Applications/VLC.app/Contents/MacOS/lib"
+targets:
+  Lumiere:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/Lumiere
+    resources:
+      - path: Resources/AppIcon.icns
+      - path: icon.png
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.apoev.lumiere
+        COMBINE_HIDPI_IMAGES: YES
+        ENABLE_HARDENED_RUNTIME: NO
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
+        HEADER_SEARCH_PATHS: /Applications/VLC.app/Contents/MacOS/include
+        OTHER_LDFLAGS: "-L/Applications/VLC.app/Contents/MacOS/lib -lvlc"
