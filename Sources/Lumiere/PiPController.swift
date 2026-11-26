@@ -39,14 +39,12 @@ final class PiPController: NSObject, NSWindowDelegate {
         let size = NSSize(width: 480, height: 300)
         let panel = NSPanel(
             contentRect: NSRect(origin: .zero, size: size),
-            styleMask: [.titled, .closable, .resizable, .fullSizeContentView, .nonactivatingPanel, .utilityWindow],
+            styleMask: [.borderless, .resizable, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
         panel.identifier = NSUserInterfaceItemIdentifier(Self.windowID)
         panel.title = "Lumiere"
-        panel.titlebarAppearsTransparent = true
-        panel.titleVisibility = .hidden
         panel.isFloatingPanel = true
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
@@ -61,10 +59,8 @@ final class PiPController: NSObject, NSWindowDelegate {
         panel.minSize = NSSize(width: 320, height: 200)
         panel.delegate = self
 
-        let host = NSHostingView(rootView: PiPOverlay(model: model))
-        host.wantsLayer = true
-        host.layer?.cornerRadius = 14
-        host.layer?.masksToBounds = true
+        let host = PiPHostingView(rootView: PiPOverlay(model: model))
+        host.roundCorners()
         panel.contentView = host
 
         if let screen = NSScreen.main?.visibleFrame {
@@ -79,5 +75,36 @@ final class PiPController: NSObject, NSWindowDelegate {
             )
         }
         return panel
+    }
+}
+
+/// Без заголовка системные кнопки не рисуются, поэтому окно тащим за само видео.
+final class PiPDragView: NSView {
+    override func mouseDown(with event: NSEvent) {
+        window?.performDrag(with: event)
+    }
+}
+
+struct PiPDragSurface: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        PiPDragView()
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
+final class PiPHostingView: NSHostingView<PiPOverlay> {
+    func roundCorners() {
+        wantsLayer = true
+        layer?.cornerRadius = 16
+        layer?.cornerCurve = .continuous
+        layer?.masksToBounds = true
+        layer?.backgroundColor = NSColor.black.cgColor
+    }
+
+    override func layout() {
+        super.layout()
+        roundCorners()
+        window?.invalidateShadow()
     }
 }

@@ -189,7 +189,10 @@ final class PlayerModel: ObservableObject {
         let batch = externalURLs
         externalURLs = []
         guard !batch.isEmpty else { return }
-        add(urls: batch, mode: .open)
+        // m3u — это готовый список, его нужно поставить вместо текущего.
+        // Обычные файлы из Finder по-прежнему добавляются к тому, что уже открыто.
+        let mode: AddMode = batch.contains(where: Self.isPlaylistFile) ? .replace : .open
+        add(urls: batch, mode: mode)
     }
 
     private func drainJobs() {
@@ -869,6 +872,30 @@ final class PlayerModel: ObservableObject {
         return nil
     }
 
+    private static func isPlaylistFile(_ url: URL) -> Bool {
+        ["m3u", "m3u8"].contains(url.pathExtension.lowercased())
+    }
+
+    /// Строки m3u — абсолютные или относительные пути к файлам. Комментарии и ссылки пропускаются.
+    private static func readPlaylist(_ url: URL) -> [URL] {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+        let base = url.deletingLastPathComponent()
+        var files: [URL] = []
+        for raw in text.split(whereSeparator: \.isNewline) {
+            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.isEmpty || line.hasPrefix("#") { continue }
+            if line.hasPrefix("http://") || line.hasPrefix("https://") { continue }
+            if line.hasPrefix("file://"), let remote = URL(string: line), remote.isFileURL {
+                files.append(remote)
+            } else if line.hasPrefix("/") {
+                files.append(URL(fileURLWithPath: line))
+            } else {
+                files.append(base.appendingPathComponent(line))
+            }
+        }
+        return files
+    }
+
     private static let folderExtensions: Set<String> = [
         "mp4", "m4v", "mov", "mkv", "avi", "wmv", "asf", "flv", "webm",
         "mpg", "mpeg", "mpe", "mpv", "m2v", "m2ts", "mts", "ts", "vob",
@@ -881,26 +908,40 @@ final class PlayerModel: ObservableObject {
     private static func expand(_ urls: [URL]) -> [URL] {
         let manager = FileManager.default
         var files: [URL] = []
+        var preserveOrder = false
         for url in urls {
             var isDirectory: ObjCBool = false
             guard manager.fileExists(atPath: url.path, isDirectory: &isDirectory) else { continue }
+            if Self.isPlaylistFile(url) {
+                preserveOrder = true
+                files.append(contentsOf: Self.readPlaylist(url).filter {
+                    manager.fileExists(atPath: $0.path)
+                })
+                continue
+            }
             if isDirectory.boolValue {
-                guard let enumerator = manager.enumerator(
-                    at: url,
-                    includingPropertiesForKeys: [.isRegularFileKey],
-                    options: [.skipsHiddenFiles, .skipsPackageDescendants]
-                ) else { continue }
-                for case let item as URL in enumerator {
-                    let ext = item.pathExtension.lowercased()
-                    guard folderExtensions.contains(ext) else { continue }
-                    files.append(item.standardizedFileURL)
-                }
+                files.append(contentsOf: filesInFolder(url))
             } else {
                 files.append(url.standardizedFileURL)
             }
         }
         var seen = Set<String>()
-        let unique = files.filter { seen.insert($0.path).inserted }
+        let unique = files.map(\.standardizedFileURL).filter { seen.insert($0.path).inserted }
+        if preserveOrder { return unique }
         return unique.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+    }
+
+    private static func filesInFolder(_ url: URL) -> [URL] {
+        guard let enumerator = FileManager.default.enumerator(
+            at: url,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else { return [] }
+        var files: [URL] = []
+        for case let item as URL in enumerator {
+            guard folderExtensions.contains(item.pathExtension.lowercased()) else { continue }
+            files.append(item.standardizedFileURL)
+        }
+        return files.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
     }
 }

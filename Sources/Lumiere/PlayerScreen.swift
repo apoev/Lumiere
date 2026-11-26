@@ -477,95 +477,135 @@ struct PiPOverlay: View {
     @ObservedObject var model: PlayerModel
     @State private var scrub = 0.0
     @State private var draggingTimeline = false
+    @State private var pointerInside = false
+
+    private var showChrome: Bool {
+        pointerInside || draggingTimeline
+    }
 
     var body: some View {
-        ZStack(alignment: .bottom) {
+        ZStack {
             Color.black
             VideoHost(model: model)
+            PiPDragSurface()
             if !model.hasVideo, model.currentIndex != nil {
                 Image(systemName: "waveform")
                     .font(.system(size: 28))
                     .foregroundStyle(Color.lumiereAccent)
-                    .padding(.bottom, 64)
             }
-            VStack(spacing: 6) {
-                Slider(
-                    value: Binding(
-                        get: { draggingTimeline ? scrub : fraction },
-                        set: { newValue in
-                            scrub = newValue
-                            model.preview(fraction: newValue)
-                        }
-                    ),
-                    in: 0...1,
-                    onEditingChanged: { editing in
-                        draggingTimeline = editing
-                        if editing {
-                            scrub = fraction
-                            model.beginScrub()
-                        } else {
-                            model.preview(fraction: scrub)
-                            model.endScrub()
-                        }
-                    }
-                )
-                .disabled(model.duration <= 0)
-                HStack(spacing: 4) {
-                    Button {
-                        model.togglePlay()
-                    } label: {
-                        Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
-                            .frame(width: 28, height: 26)
-                    }
-                    .buttonStyle(.plain)
-                    Button {
-                        model.seek(by: -PlayerModel.skipSeconds)
-                    } label: {
-                        Image(systemName: "gobackward.10")
-                            .frame(width: 28, height: 26)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Назад на 10 секунд")
-                    Button {
-                        model.seek(by: PlayerModel.skipSeconds)
-                    } label: {
-                        Image(systemName: "goforward.10")
-                            .frame(width: 28, height: 26)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Вперёд на 10 секунд")
-                    Menu {
-                        ForEach(PlayerModel.rates, id: \.self) { rate in
-                            Button(formatRate(rate)) { model.setRate(rate) }
-                        }
-                    } label: {
-                        Text(formatRate(model.rate))
-                            .font(.system(size: 12, weight: .semibold, design: .rounded))
-                            .frame(minWidth: 44)
-                    }
-                    .menuStyle(.borderlessButton)
-                    .frame(width: 64)
-                    .help("Скорость")
-                    Text(formatTime(model.currentTime))
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.8))
-                    Spacer(minLength: 4)
+            VStack(spacing: 0) {
+                HStack {
+                    Spacer()
                     Button {
                         model.setPictureInPicture(false)
                     } label: {
-                        Image(systemName: "pip.exit")
-                            .frame(width: 28, height: 26)
+                        Image(systemName: "xmark")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 22, height: 22)
+                            .background(Circle().fill(Color.black.opacity(0.55)))
                     }
                     .buttonStyle(.plain)
-                    .help("Вернуть в окно")
+                    .help("Закрыть")
                 }
+                .padding(10)
+                Spacer(minLength: 0)
+                controls
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 8)
             }
-            .padding(.horizontal, 10)
-            .padding(.top, 8)
-            .padding(.bottom, 8)
-            .background(Color.black.opacity(0.62))
+            .opacity(showChrome ? 1 : 0)
+            .allowsHitTesting(showChrome)
+            .animation(.easeInOut(duration: 0.16), value: showChrome)
         }
-        .padding(.top, 18)
+        .onHover { pointerInside = $0 }
+        .environment(\.colorScheme, .dark)
+        .foregroundStyle(.white)
+    }
+
+    private var controls: some View {
+        VStack(spacing: 6) {
+            Slider(
+                value: Binding(
+                    get: { draggingTimeline ? scrub : fraction },
+                    set: { newValue in
+                        scrub = newValue
+                        model.preview(fraction: newValue)
+                    }
+                ),
+                in: 0...1,
+                onEditingChanged: { editing in
+                    draggingTimeline = editing
+                    if editing {
+                        scrub = fraction
+                        model.beginScrub()
+                    } else {
+                        model.preview(fraction: scrub)
+                        model.endScrub()
+                    }
+                }
+            )
+            .disabled(model.duration <= 0)
+            .tint(Color.lumiereAccent)
+            HStack(spacing: 4) {
+                Button {
+                    model.togglePlay()
+                } label: {
+                    Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
+                        .foregroundStyle(.white)
+                        .frame(width: 28, height: 26)
+                }
+                .buttonStyle(.plain)
+                Button {
+                    model.seek(by: -PlayerModel.skipSeconds)
+                } label: {
+                    Image(systemName: "gobackward.10")
+                        .foregroundStyle(.white)
+                        .frame(width: 28, height: 26)
+                }
+                .buttonStyle(.plain)
+                .help("Назад на 10 секунд")
+                Button {
+                    model.seek(by: PlayerModel.skipSeconds)
+                } label: {
+                    Image(systemName: "goforward.10")
+                        .foregroundStyle(.white)
+                        .frame(width: 28, height: 26)
+                }
+                .buttonStyle(.plain)
+                .help("Вперёд на 10 секунд")
+                Menu {
+                    ForEach(PlayerModel.rates, id: \.self) { rate in
+                        Button(formatRate(rate)) { model.setRate(rate) }
+                    }
+                } label: {
+                    Text(formatRate(model.rate))
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white)
+                        .frame(minWidth: 44)
+                }
+                .menuStyle(.borderlessButton)
+                .frame(width: 64)
+                .help("Скорость")
+                Text(formatTime(model.currentTime))
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.white)
+                Spacer(minLength: 4)
+                Button {
+                    model.setPictureInPicture(false)
+                } label: {
+                    Image(systemName: "pip.exit")
+                        .foregroundStyle(.white)
+                        .frame(width: 28, height: 26)
+                }
+                .buttonStyle(.plain)
+                .help("Вернуть в окно")
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.top, 8)
+        .padding(.bottom, 8)
+        .background(Color.black.opacity(0.72), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     private var fraction: Double {
