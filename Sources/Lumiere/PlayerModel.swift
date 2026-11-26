@@ -72,6 +72,10 @@ final class PlayerModel: ObservableObject {
     private var draggedID: UUID?
     private var lastStoredPosition: Double = -1
     private var frameBeforePlay: NSRect?
+    private var scrubIdle: DispatchWorkItem?
+    private var scrubHoldUntil = Date.distantPast
+    private var lastSeekSentAt = Date.distantPast
+    private var lastSeekSent = -1.0
 
     private enum Keys {
         static let rate = "lumiere.rate"
@@ -322,28 +326,79 @@ final class PlayerModel: ObservableObject {
 
     func seek(by seconds: Double) {
         guard duration > 0 else { return }
-        let target = min(max(0, currentTime + seconds), max(0, duration - 0.15))
-        seek(to: target)
+        seek(to: clampedTime(currentTime + seconds))
     }
 
     func seek(to seconds: Double) {
+        let target = clampedTime(seconds)
         resume = nil
-        currentTime = seconds
-        engine?.setTime(seconds)
+        currentTime = target
+        deliverSeek(target)
         pokeControls()
+    }
+
+    func beginScrub() {
+        isScrubbing = true
     }
 
     func scrub(byScroll delta: CGFloat) {
         guard duration > 0 else { return }
-        seek(by: Double(delta) * 0.12)
+        trackScrub(to: currentTime + Double(delta) * 0.12)
     }
 
     func preview(fraction: Double) {
-        isScrubbing = true
         guard duration > 0 else { return }
-        let target = min(max(0, fraction), 1) * duration
+        trackScrub(to: min(max(0, fraction), 1) * duration)
+    }
+
+    func endScrub() {
+        scrubIdle?.cancel()
+        isScrubbing = true
+        deliverSeek(currentTime)
+        releaseScrubHold()
+    }
+
+    private func clampedTime(_ seconds: Double) -> Double {
+        min(max(0, seconds), max(0, duration - 0.15))
+    }
+
+    /// Ползунок двигается сразу, а libvlc получает позицию не чаще десяти раз в секунду.
+    private func trackScrub(to seconds: Double) {
+        let target = clampedTime(seconds)
+        resume = nil
+        if !isScrubbing { pokeControls() }
         currentTime = target
+        isScrubbing = true
+        if Date().timeIntervalSince(lastSeekSentAt) >= 0.1 {
+            deliverSeek(target)
+        }
+        scrubIdle?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.deliverSeek(self.currentTime)
+            self.releaseScrubHold()
+        }
+        scrubIdle = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+    }
+
+    private func deliverSeek(_ seconds: Double) {
+        let target = clampedTime(seconds)
+        guard abs(target - lastSeekSent) > 0.04 || Date().timeIntervalSince(lastSeekSentAt) > 0.25 else { return }
+        lastSeekSent = target
+        lastSeekSentAt = Date()
         engine?.setTime(target)
+        scrubHoldUntil = Date().addingTimeInterval(0.45)
+    }
+
+    private func releaseScrubHold() {
+        scrubHoldUntil = Date().addingTimeInterval(0.35)
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, Date() >= self.scrubHoldUntil else { return }
+            self.isScrubbing = false
+        }
+        scrubIdle = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
     }
 
     func setRate(_ value: Float) {
@@ -514,15 +569,18 @@ final class PlayerModel: ObservableObject {
         let dx = (event.hasPreciseScrollingDeltas ? event.scrollingDeltaX : event.deltaX) * scale
         let dy = (event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.deltaY) * scale
         let overTimeline = point.y < 140
+        let horizontal = abs(dx) >= abs(dy) && abs(dx) >= 0.4
         let delta: CGFloat
-        if abs(dx) >= abs(dy), abs(dx) >= 0.4 {
-            delta = dx
+        if horizontal {
+            // Жест вправо — вперёд, независимо от «естественной» прокрутки системы.
+            delta = event.isDirectionInvertedFromDevice ? dx : -dx
         } else if (overTimeline || isPip), abs(dy) >= 0.4 {
             delta = dy
         } else {
             return false
         }
-        scrub(byScroll: delta)
+        let direction: CGFloat = AppSettings.shared.invertScroll ? -1 : 1
+        scrub(byScroll: delta * direction)
         return true
     }
 
@@ -628,11 +686,14 @@ final class PlayerModel: ObservableObject {
 
     private func tick() {
         guard let engine, currentIndex != nil, mediaStarted else { return }
-        if !isScrubbing {
-            let time = engine.time()
+        let time = engine.time()
+        let holding = isScrubbing || Date() < scrubHoldUntil
+        if !holding {
             if abs(time - currentTime) > 0.05 {
                 currentTime = time
             }
+        } else if !isScrubbing, abs(time - currentTime) < 0.25 {
+            scrubHoldUntil = .distantPast
         }
         let length = engine.length()
         if length > 0, abs(length - duration) > 0.2 {

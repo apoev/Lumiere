@@ -43,6 +43,11 @@ final class AppSettings: ObservableObject {
         }
     }
 
+    /// Выключено: жест вправо перематывает вперёд. Включено — наоборот.
+    @Published var invertScroll: Bool {
+        didSet { UserDefaults.standard.set(invertScroll, forKey: Keys.invertScroll) }
+    }
+
     @Published var associations: [AssociationKind] = []
     @Published var associationStatus: String?
 
@@ -61,11 +66,13 @@ final class AppSettings: ObservableObject {
 
     private enum Keys {
         static let theme = "lumiere.theme"
+        static let invertScroll = "lumiere.invertScroll"
     }
 
     private init() {
         let raw = UserDefaults.standard.string(forKey: Keys.theme) ?? ThemeChoice.system.rawValue
         theme = ThemeChoice(rawValue: raw) ?? .system
+        invertScroll = UserDefaults.standard.bool(forKey: Keys.invertScroll)
     }
 
     func applyAppearance() {
@@ -144,6 +151,18 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.radioGroup)
                 .labelsHidden()
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Прокрутка")
+                    .font(.headline)
+                Toggle("Инвертировать направление", isOn: $settings.invertScroll)
+                Text("Выключено: скролл вправо перематывает вперёд.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Divider()

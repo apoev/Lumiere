@@ -7,6 +7,7 @@ struct PlayerScreen: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var dropTargeted = false
     @State private var scrub = 0.0
+    @State private var draggingTimeline = false
     @State private var singleClick: DispatchWorkItem?
 
     var body: some View {
@@ -137,7 +138,7 @@ struct PlayerScreen: View {
                     .frame(width: 64, alignment: .leading)
                 Slider(
                     value: Binding(
-                        get: { model.isScrubbing ? scrub : fraction },
+                        get: { draggingTimeline ? scrub : fraction },
                         set: { newValue in
                             scrub = newValue
                             model.preview(fraction: newValue)
@@ -145,12 +146,13 @@ struct PlayerScreen: View {
                     ),
                     in: 0...1,
                     onEditingChanged: { editing in
+                        draggingTimeline = editing
                         if editing {
                             scrub = fraction
-                            model.isScrubbing = true
+                            model.beginScrub()
                         } else {
                             model.preview(fraction: scrub)
-                            model.isScrubbing = false
+                            model.endScrub()
                             model.pokeControls()
                         }
                     }
@@ -161,6 +163,7 @@ struct PlayerScreen: View {
                     .foregroundStyle(.white.opacity(0.55))
                     .frame(width: 64, alignment: .trailing)
             }
+            GeometryReader { geo in
             ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
                 IconButton(system: "backward.end.fill", help: "Предыдущий") {
@@ -217,6 +220,8 @@ struct PlayerScreen: View {
                 IconButton(system: "list.bullet", help: "Плейлист") {
                     model.togglePlaylist()
                 }
+            }
+            .frame(minWidth: geo.size.width, alignment: .center)
             }
             }
             .frame(height: 44)
@@ -471,6 +476,7 @@ struct PlayerScreen: View {
 struct PiPOverlay: View {
     @ObservedObject var model: PlayerModel
     @State private var scrub = 0.0
+    @State private var draggingTimeline = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -485,7 +491,7 @@ struct PiPOverlay: View {
             VStack(spacing: 6) {
                 Slider(
                     value: Binding(
-                        get: { model.isScrubbing ? scrub : fraction },
+                        get: { draggingTimeline ? scrub : fraction },
                         set: { newValue in
                             scrub = newValue
                             model.preview(fraction: newValue)
@@ -493,12 +499,13 @@ struct PiPOverlay: View {
                     ),
                     in: 0...1,
                     onEditingChanged: { editing in
+                        draggingTimeline = editing
                         if editing {
                             scrub = fraction
-                            model.isScrubbing = true
+                            model.beginScrub()
                         } else {
                             model.preview(fraction: scrub)
-                            model.isScrubbing = false
+                            model.endScrub()
                         }
                     }
                 )
