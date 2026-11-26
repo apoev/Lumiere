@@ -9,6 +9,24 @@
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>mp4</string>
+				<string>m4v</string>
+				<string>mov</string>
+				<string>mkv</string>
+				<string>avi</string>
+				<string>wmv</string>
+				<string>asf</string>
+				<string>webm</string>
+				<string>flv</string>
+				<string>mpg</string>
+				<string>mpeg</string>
+				<string>ts</string>
+				<string>m2ts</string>
+				<string>mts</string>
+				<string>3gp</string>
+			</array>
 			<key>CFBundleTypeName</key>
 			<string>Медиа</string>
 			<key>CFBundleTypeRole</key>
@@ -19,6 +37,9 @@
 			<array>
 				<string>public.movie</string>
 				<string>public.video</string>
+				<string>public.mpeg-4</string>
+				<string>com.apple.quicktime-movie</string>
+				<string>public.avi</string>
 				<string>public.audio</string>
 				<string>public.audiovisual-content</string>
 			</array>
@@ -35,9 +56,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.1</string>
+	<string>1.0.4</string>
 	<key>CFBundleVersion</key>
-	<string>1.0.1</string>
+	<string>1.0.4</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.video</string>
 	<key>LSMinimumSystemVersion</key>

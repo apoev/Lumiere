@@ -5,7 +5,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     static var pending: [URL] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.appearance = NSAppearance(named: .darkAqua)
+        AppSettings.shared.applyAppearance()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        PlayerModel.current?.saveSession()
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -47,6 +51,12 @@ struct LumiereApp: App {
                 }
                 .keyboardShortcut("o", modifiers: [.command, .option])
             }
+            CommandGroup(after: .appSettings) {
+                Button("Плейлист") {
+                    PlayerModel.current?.togglePlaylist()
+                }
+                .keyboardShortcut("l")
+            }
             CommandMenu("Воспроизведение") {
                 Button("Пауза / воспроизведение") {
                     PlayerModel.current?.togglePlay()
@@ -66,11 +76,11 @@ struct LumiereApp: App {
                     model.setPictureInPicture(!model.pictureInPicture)
                 }
                 .keyboardShortcut("p", modifiers: [.command, .shift])
-                Button("Плейлист") {
-                    PlayerModel.current?.togglePlaylist()
-                }
-                .keyboardShortcut("l")
             }
+        }
+
+        Settings {
+            SettingsView()
         }
     }
 }

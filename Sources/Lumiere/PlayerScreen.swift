@@ -3,25 +3,31 @@ import SwiftUI
 
 struct PlayerScreen: View {
     @StateObject private var model = PlayerModel()
+    @ObservedObject private var settings = AppSettings.shared
+    @Environment(\.colorScheme) private var colorScheme
     @State private var dropTargeted = false
     @State private var scrub = 0.0
+    @State private var singleClick: DispatchWorkItem?
 
     var body: some View {
         HStack(spacing: 0) {
             if model.showPlaylist {
                 playlist
-                    .frame(width: 300)
+                    .frame(width: PlayerModel.playlistColumnWidth)
                 Rectangle()
-                    .fill(Color.white.opacity(0.08))
+                    .fill(colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.08))
                     .frame(width: 1)
             }
             stage
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(minWidth: 900, minHeight: 560)
-        .background(Color.lumiereBg)
-        .preferredColorScheme(.dark)
+        .frame(minWidth: 360, minHeight: 220)
+        .background(colorScheme == .dark ? Color.lumiereBg : Color(nsColor: .windowBackgroundColor))
+        .preferredColorScheme(settings.theme.colorScheme)
         .tint(Color.lumiereAccent)
+        .animation(.easeInOut(duration: 0.18), value: model.showPlaylist)
         .onAppear {
+            settings.applyAppearance()
             model.consumeLaunch()
         }
         .background(WindowTitle(title: model.currentTitle ?? "Lumiere"))
@@ -48,7 +54,16 @@ struct PlayerScreen: View {
                     }
                     Color.clear
                         .contentShape(Rectangle())
-                        .onTapGesture { model.togglePlay() }
+                        .onTapGesture(count: 2) {
+                            singleClick?.cancel()
+                            model.toggleFullscreen()
+                        }
+                        .onTapGesture(count: 1) {
+                            singleClick?.cancel()
+                            let work = DispatchWorkItem { model.togglePlay() }
+                            singleClick = work
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.22, execute: work)
+                        }
                 }
             }
             if dropTargeted {
@@ -70,6 +85,7 @@ struct PlayerScreen: View {
                 model.pokeControls()
             }
         }
+        .environment(\.colorScheme, .dark)
     }
 
     private var overlayChrome: some View {
@@ -106,18 +122,6 @@ struct PlayerScreen: View {
             }
             .padding(.leading, 78)
             Spacer()
-            Button {
-                model.openFiles(replacing: true)
-            } label: {
-                Label("Открыть", systemImage: "folder")
-            }
-            .buttonStyle(ChromeButtonStyle())
-            Button {
-                model.openFolder()
-            } label: {
-                Label("Папка", systemImage: "folder.badge.plus")
-            }
-            .buttonStyle(ChromeButtonStyle())
         }
         .padding(.trailing, 14)
         .padding(.top, 10)
@@ -157,6 +161,7 @@ struct PlayerScreen: View {
                     .foregroundStyle(.white.opacity(0.55))
                     .frame(width: 64, alignment: .trailing)
             }
+            ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
                 IconButton(system: "backward.end.fill", help: "Предыдущий") {
                     model.previous()
@@ -181,7 +186,6 @@ struct PlayerScreen: View {
                 IconButton(system: "forward.end.fill", help: "Следующий") {
                     model.next()
                 }
-                Spacer(minLength: 8)
                 speedMenu
                 Button {
                     model.toggleMute()
@@ -214,6 +218,8 @@ struct PlayerScreen: View {
                     model.togglePlaylist()
                 }
             }
+            }
+            .frame(height: 44)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -249,13 +255,29 @@ struct PlayerScreen: View {
 
     private var playlist: some View {
         VStack(spacing: 0) {
-            HStack {
+            HStack(spacing: 8) {
                 Text("Плейлист")
                     .font(.system(size: 13, weight: .semibold))
                 Text("\(model.playlist.count)")
                     .font(.system(size: 12, weight: .medium, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.45))
-                Spacer()
+                    .foregroundStyle(playlistSecondary)
+                Spacer(minLength: 4)
+                Button {
+                    model.sortPlaylist(ascending: true)
+                } label: {
+                    Image(systemName: "arrow.up")
+                }
+                .buttonStyle(.plain)
+                .disabled(model.playlist.count < 2)
+                .help("По возрастанию")
+                Button {
+                    model.sortPlaylist(ascending: false)
+                } label: {
+                    Image(systemName: "arrow.down")
+                }
+                .buttonStyle(.plain)
+                .disabled(model.playlist.count < 2)
+                .help("По убыванию")
                 Button {
                     model.openFiles(replacing: false)
                 } label: {
@@ -264,6 +286,13 @@ struct PlayerScreen: View {
                 .buttonStyle(.plain)
                 .help("Добавить файлы")
                 Button {
+                    model.openFolder()
+                } label: {
+                    Image(systemName: "folder")
+                }
+                .buttonStyle(.plain)
+                .help("Добавить папку")
+                Button {
                     model.clearPlaylist()
                 } label: {
                     Image(systemName: "trash")
@@ -271,11 +300,18 @@ struct PlayerScreen: View {
                 .buttonStyle(.plain)
                 .disabled(model.playlist.isEmpty)
                 .help("Очистить")
+                Button {
+                    model.togglePlaylist()
+                } label: {
+                    Image(systemName: "sidebar.left")
+                }
+                .buttonStyle(.plain)
+                .help("Свернуть плейлист")
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 12)
             .padding(.top, 16)
             .padding(.bottom, 10)
-            .foregroundStyle(.white.opacity(0.9))
+            .foregroundStyle(playlistPrimary)
 
             if model.playlist.isEmpty {
                 VStack(spacing: 8) {
@@ -284,9 +320,9 @@ struct PlayerScreen: View {
                         .foregroundStyle(Color.lumiereAccent.opacity(0.8))
                     Text("Пока пусто")
                         .font(.system(size: 13, weight: .medium))
-                    Text("Откройте файлы или перетащите их в окно.")
+                    Text("Добавьте файлы кнопкой сверху или перетащите их в окно.")
                         .font(.system(size: 12))
-                        .foregroundStyle(.white.opacity(0.45))
+                        .foregroundStyle(playlistSecondary)
                         .multilineTextAlignment(.center)
                 }
                 .padding(24)
@@ -312,7 +348,15 @@ struct PlayerScreen: View {
                 }
             }
         }
-        .background(Color.lumiereBg.opacity(0.96))
+        .background(colorScheme == .dark ? Color.lumiereBg.opacity(0.96) : Color(nsColor: .windowBackgroundColor))
+    }
+
+    private var playlistPrimary: Color {
+        colorScheme == .dark ? .white : Color(red: 0.12, green: 0.11, blue: 0.16)
+    }
+
+    private var playlistSecondary: Color {
+        playlistPrimary.opacity(0.5)
     }
 
     private func playlistRow(index: Int, item: MediaItem) -> some View {
@@ -320,11 +364,16 @@ struct PlayerScreen: View {
             title: item.title,
             path: item.url.path,
             isCurrent: index == model.currentIndex,
-            isPlaying: index == model.currentIndex && model.isPlaying
+            isPlaying: index == model.currentIndex && model.isPlaying,
+            fraction: model.watchedFraction(for: item.url)
         ) {
             model.play(index: index)
         } onRemove: {
             model.remove(at: index)
+        } onDrag: {
+            model.beginDrag(item.id)
+        } onDrop: {
+            model.dropDraggedItem(before: item.id)
         }
     }
 
@@ -335,7 +384,7 @@ struct PlayerScreen: View {
                 .shadow(color: Color.lumiereAccent.opacity(0.45), radius: 24)
             Text("Перетащите видео сюда")
                 .font(.system(size: 20, weight: .semibold))
-            Text("Пробел — пауза, стрелки — 10 секунд, P — картинка в картинке, [ ] — скорость.")
+            Text("Двойной щелчок — на весь экран. Свайп по таймлайну — перемотка. Пробел — пауза, стрелки — 10 секунд.")
                 .font(.system(size: 12))
                 .foregroundStyle(.white.opacity(0.5))
                 .multilineTextAlignment(.center)
@@ -523,41 +572,85 @@ private struct PlaylistRow: View {
     var path: String
     var isCurrent: Bool
     var isPlaying: Bool
+    var fraction: Double
     var onPlay: () -> Void
     var onRemove: () -> Void
+    var onDrag: () -> Void
+    var onDrop: () -> Void
     @State private var hover = false
+    @State private var dropTargeted = false
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: isCurrent ? (isPlaying ? "speaker.wave.2.fill" : "pause.fill") : "film")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(isCurrent ? Color.lumiereAccent : Color.white.opacity(0.35))
-                .frame(width: 16)
-            Text(title)
-                .font(.system(size: 12, weight: isCurrent ? .semibold : .regular))
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .foregroundStyle(.white.opacity(isCurrent ? 1 : 0.82))
-            Spacer(minLength: 4)
-            Button(action: onRemove) {
-                Image(systemName: "xmark")
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 8) {
+                Image(systemName: "line.3.horizontal")
                     .font(.system(size: 10, weight: .bold))
-                    .frame(width: 18, height: 18)
+                    .foregroundStyle(primary.opacity(hover ? 0.55 : 0.28))
+                    .frame(width: 12)
+                Image(systemName: isCurrent ? (isPlaying ? "speaker.wave.2.fill" : "pause.fill") : "film")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(isCurrent ? Color.lumiereAccent : primary.opacity(0.4))
+                    .frame(width: 16)
+                Text(title)
+                    .font(.system(size: 12, weight: isCurrent ? .semibold : .regular))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .foregroundStyle(primary.opacity(isCurrent ? 1 : 0.82))
+                Spacer(minLength: 4)
+                Button(action: onRemove) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.plain)
+                .opacity(hover ? 0.8 : 0)
+                .help("Убрать из плейлиста")
             }
-            .buttonStyle(.plain)
-            .opacity(hover ? 0.8 : 0)
-            .help("Убрать из плейлиста")
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(primary.opacity(0.12))
+                    Capsule()
+                        .fill(fraction >= 0.97 ? Color.lumiereAccent : Color.lumiereAccent.opacity(0.85))
+                        .frame(width: max(0, geo.size.width * min(1, fraction)))
+                }
+            }
+            .frame(height: 3)
+            .padding(.leading, 28)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 7)
         .background(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(isCurrent ? Color.lumiereAccent.opacity(0.2) : Color.white.opacity(hover ? 0.06 : 0))
+                .fill(rowFill)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(Color.lumiereAccent.opacity(dropTargeted ? 0.8 : 0), lineWidth: 1)
         )
         .contentShape(Rectangle())
         .onTapGesture(perform: onPlay)
         .onHover { hover = $0 }
+        .onDrag {
+            onDrag()
+            return NSItemProvider(object: path as NSString)
+        }
+        .onDrop(of: [.plainText, .fileURL], isTargeted: $dropTargeted) { _ in
+            onDrop()
+            return true
+        }
         .help(path)
+    }
+
+    private var primary: Color {
+        colorScheme == .dark ? .white : Color(red: 0.12, green: 0.11, blue: 0.16)
+    }
+
+    private var rowFill: Color {
+        if isCurrent { return Color.lumiereAccent.opacity(colorScheme == .dark ? 0.22 : 0.16) }
+        if hover || dropTargeted { return primary.opacity(0.06) }
+        return .clear
     }
 }
 

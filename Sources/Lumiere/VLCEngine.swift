@@ -43,14 +43,25 @@ final class VideoCanvas: NSView {
         super.init(frame: frameRect)
         wantsLayer = false
         autoresizesSubviews = true
+        relax(self)
     }
 
     required init?(coder: NSCoder) {
         nil
     }
 
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric)
+    }
+
+    override func didAddSubview(_ subview: NSView) {
+        super.didAddSubview(subview)
+        relax(subview)
+    }
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        relaxMainWindow()
         if window != nil {
             onAttach?()
         }
@@ -59,13 +70,35 @@ final class VideoCanvas: NSView {
     override func layout() {
         super.layout()
         for subview in subviews {
+            relax(subview)
             subview.frame = bounds
         }
+        relaxMainWindow()
     }
 
     // Клики забирает SwiftUI поверх видео, а окно картинки в картинке можно тащить за фон.
     override func hitTest(_ point: NSPoint) -> NSView? {
         nil
+    }
+
+    /// VLC подгоняет окно под размер кадра. Сбрасываем это, чтобы окно сжималось меньше видео.
+    private func relaxMainWindow() {
+        guard let window, window.identifier?.rawValue != PiPController.windowID else { return }
+        if window.contentAspectRatio != .zero {
+            window.contentAspectRatio = .zero
+        }
+        let cap = NSSize(width: 520, height: 360)
+        if window.contentMinSize.width > cap.width || window.contentMinSize.height > cap.height {
+            window.contentMinSize = NSSize(width: 360, height: 220)
+        }
+    }
+
+    private func relax(_ view: NSView) {
+        view.translatesAutoresizingMaskIntoConstraints = true
+        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        view.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+        view.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        view.setContentHuggingPriority(.defaultLow, for: .vertical)
     }
 }
 
@@ -75,10 +108,18 @@ final class HostView: NSView {
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.cgColor
         autoresizesSubviews = true
+        setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+        setContentHuggingPriority(.defaultLow, for: .horizontal)
+        setContentHuggingPriority(.defaultLow, for: .vertical)
     }
 
     required init?(coder: NSCoder) {
         nil
+    }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric)
     }
 }
 

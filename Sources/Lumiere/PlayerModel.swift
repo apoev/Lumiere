@@ -19,14 +19,24 @@ struct MediaItem: Identifiable, Hashable, Sendable {
 enum AddMode {
     case replace
     case append
+    /// Файл из Finder: добавить к сохранённому списку и включить его.
+    case open
+}
+
+struct WatchProgress: Codable, Equatable {
+    var position: Double
+    var duration: Double
+    var finished: Bool
 }
 
 final class PlayerModel: ObservableObject {
     static weak var current: PlayerModel?
     static let skipSeconds: Double = 10
     static let rates: [Float] = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3]
+    static let playlistColumnWidth: CGFloat = 280
 
     @Published var playlist: [MediaItem] = []
+    @Published var progress: [String: WatchProgress] = [:]
     @Published var currentIndex: Int?
     @Published var isPlaying = false
     @Published var currentTime: Double = 0
@@ -44,6 +54,7 @@ final class PlayerModel: ObservableObject {
 
     let engine: VLCEngine?
     private var keyMonitor: Any?
+    private var scrollMonitor: Any?
     private var timer: Timer?
     private var hideWork: DispatchWorkItem?
     private var activity: NSObjectProtocol?
@@ -55,10 +66,17 @@ final class PlayerModel: ObservableObject {
     private var draining = false
     private var externalURLs: [URL] = []
     private var externalScheduled = false
+    private var mediaStarted = false
+    private var resume: (generation: Int, time: Double)?
+    private var saveWork: DispatchWorkItem?
+    private var draggedID: UUID?
+    private var lastStoredPosition: Double = -1
+    private var frameBeforePlay: NSRect?
 
     private enum Keys {
         static let rate = "lumiere.rate"
         static let volume = "lumiere.volume"
+        static let showPlaylist = "lumiere.showPlaylist"
     }
 
     init() {
@@ -66,12 +84,16 @@ final class PlayerModel: ObservableObject {
         let storedVolume = UserDefaults.standard.object(forKey: Keys.volume) as? Int ?? 100
         rate = PlayerModel.rates.contains(storedRate) ? storedRate : 1
         volume = min(100, max(0, storedVolume))
+        if UserDefaults.standard.object(forKey: Keys.showPlaylist) != nil {
+            showPlaylist = UserDefaults.standard.bool(forKey: Keys.showPlaylist)
+        }
         if let plugins = VLCLocator.pluginPath() {
             engine = VLCEngine(pluginPath: plugins)
         } else {
             engine = nil
         }
         vlcMissing = engine == nil
+        loadLibrary()
         engine?.onEvent = { [weak self] event in
             self?.handle(event)
         }
@@ -163,8 +185,7 @@ final class PlayerModel: ObservableObject {
         let batch = externalURLs
         externalURLs = []
         guard !batch.isEmpty else { return }
-        let mode: AddMode = (playlist.isEmpty && jobs.isEmpty && !draining) ? .replace : .append
-        add(urls: batch, mode: mode)
+        add(urls: batch, mode: .open)
     }
 
     private func drainJobs() {
@@ -184,6 +205,8 @@ final class PlayerModel: ObservableObject {
 
     func play(index: Int) {
         guard let engine, playlist.indices.contains(index) else { return }
+        storeProgress(force: true)
+        frameBeforePlay = NSApp.mainWindow?.frame
         playGeneration += 1
         let generation = playGeneration
         startedAt = Date()
@@ -191,12 +214,21 @@ final class PlayerModel: ObservableObject {
         aspectLocked = false
         status = nil
         hasVideo = false
-        currentTime = 0
-        duration = 0
+        mediaStarted = true
+        let path = playlist[index].url.path
+        if let mark = progress[path], !mark.finished, mark.position > 3 {
+            resume = (generation, mark.position)
+            currentTime = mark.position
+        } else {
+            resume = nil
+            currentTime = 0
+        }
+        duration = progress[path]?.duration ?? 0
         engine.play(url: playlist[index].url)
         applyPreferences()
         isPlaying = true
         pokeControls()
+        scheduleSave()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
             guard let self, self.playGeneration == generation else { return }
             self.applyPreferences()
@@ -205,6 +237,10 @@ final class PlayerModel: ObservableObject {
 
     func togglePlay() {
         guard engine != nil else { return }
+        if let currentIndex, !mediaStarted {
+            play(index: currentIndex)
+            return
+        }
         if currentIndex == nil, let first = playlist.indices.first {
             play(index: first)
             return
@@ -245,11 +281,43 @@ final class PlayerModel: ObservableObject {
         } else if let currentIndex, index < currentIndex {
             self.currentIndex = currentIndex - 1
         }
+        scheduleSave()
     }
 
     func clearPlaylist() {
+        storeProgress(force: true)
         playlist = []
         clearPlayback()
+        scheduleSave()
+    }
+
+    func sortPlaylist(ascending: Bool) {
+        let path = currentPath
+        playlist.sort { lhs, rhs in
+            let order = lhs.title.localizedStandardCompare(rhs.title)
+            return ascending ? order == .orderedAscending : order == .orderedDescending
+        }
+        rebindCurrent(path: path)
+        scheduleSave()
+    }
+
+    func beginDrag(_ id: UUID) {
+        draggedID = id
+    }
+
+    func dropDraggedItem(before id: UUID) {
+        guard let draggedID, draggedID != id,
+              let from = playlist.firstIndex(where: { $0.id == draggedID }) else { return }
+        let path = currentPath
+        let moving = playlist.remove(at: from)
+        if let to = playlist.firstIndex(where: { $0.id == id }) {
+            playlist.insert(moving, at: to)
+        } else {
+            playlist.append(moving)
+        }
+        self.draggedID = nil
+        rebindCurrent(path: path)
+        scheduleSave()
     }
 
     func seek(by seconds: Double) {
@@ -259,9 +327,15 @@ final class PlayerModel: ObservableObject {
     }
 
     func seek(to seconds: Double) {
+        resume = nil
         currentTime = seconds
         engine?.setTime(seconds)
         pokeControls()
+    }
+
+    func scrub(byScroll delta: CGFloat) {
+        guard duration > 0 else { return }
+        seek(by: Double(delta) * 0.12)
     }
 
     func preview(fraction: Double) {
@@ -324,6 +398,22 @@ final class PlayerModel: ObservableObject {
 
     func togglePlaylist() {
         showPlaylist.toggle()
+        UserDefaults.standard.set(showPlaylist, forKey: Keys.showPlaylist)
+    }
+
+    func watchedFraction(for url: URL) -> Double {
+        if mediaStarted, url.path == currentPath, duration > 0 {
+            return min(1, max(0, currentTime / duration))
+        }
+        guard let mark = progress[url.path] else { return 0 }
+        if mark.finished { return 1 }
+        guard mark.duration > 1 else { return 0 }
+        return min(1, max(0, mark.position / mark.duration))
+    }
+
+    func saveSession() {
+        storeProgress(force: true)
+        writeLibrary()
     }
 
     func toggleFullscreen() {
@@ -348,6 +438,10 @@ final class PlayerModel: ObservableObject {
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
             return self.handleKey(event) ? nil : event
+        }
+        scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            guard let self else { return event }
+            return self.handleScroll(event) ? nil : event
         }
     }
 
@@ -408,17 +502,43 @@ final class PlayerModel: ObservableObject {
         }
     }
 
+    private func handleScroll(_ event: NSEvent) -> Bool {
+        if NSApp.modalWindow != nil { return false }
+        guard let window = event.window, mediaStarted, duration > 0, currentIndex != nil else { return false }
+        let point = event.locationInWindow
+        let isPip = window.identifier?.rawValue == PiPController.windowID
+        if !isPip, showPlaylist, point.x < PlayerModel.playlistColumnWidth {
+            return false
+        }
+        let scale: CGFloat = event.hasPreciseScrollingDeltas ? 1 : 18
+        let dx = (event.hasPreciseScrollingDeltas ? event.scrollingDeltaX : event.deltaX) * scale
+        let dy = (event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.deltaY) * scale
+        let overTimeline = point.y < 140
+        let delta: CGFloat
+        if abs(dx) >= abs(dy), abs(dx) >= 0.4 {
+            delta = dx
+        } else if (overTimeline || isPip), abs(dy) >= 0.4 {
+            delta = dy
+        } else {
+            return false
+        }
+        scrub(byScroll: delta)
+        return true
+    }
+
     private func handle(_ event: EngineEvent) {
         switch event {
         case .ended:
             // Смена файла тоже шлёт EndReached. Короткое окно после старта — это ещё прошлый ролик.
             guard Date().timeIntervalSince(startedAt) > 0.6 else { return }
             startedAt = Date()
+            markCurrentFinished()
             isPlaying = false
             if let currentIndex, playlist.indices.contains(currentIndex + 1) {
                 play(index: currentIndex + 1)
             } else {
                 pokeControls()
+                scheduleSave()
             }
         case .failed:
             isPlaying = false
@@ -427,6 +547,8 @@ final class PlayerModel: ObservableObject {
         case .playing:
             isPlaying = true
             applyPreferences()
+            applyResume()
+            keepWindowFromVideoSize()
             updateActivity()
         case .paused, .stopped:
             isPlaying = false
@@ -444,6 +566,9 @@ final class PlayerModel: ObservableObject {
         let items = urls.map { MediaItem(url: $0) }
         switch mode {
         case .replace:
+            storeProgress(force: true)
+            currentIndex = nil
+            mediaStarted = false
             playlist = items
             play(index: 0)
         case .append:
@@ -456,10 +581,26 @@ final class PlayerModel: ObservableObject {
             } else if currentIndex == nil, let first = playlist.indices.first {
                 play(index: first)
             }
+        case .open:
+            var firstIndex: Int?
+            for url in urls {
+                if let index = playlist.firstIndex(where: { $0.url.path == url.path }) {
+                    if firstIndex == nil { firstIndex = index }
+                } else {
+                    playlist.append(MediaItem(url: url))
+                    if firstIndex == nil { firstIndex = playlist.count - 1 }
+                }
+            }
+            if let firstIndex {
+                play(index: firstIndex)
+            }
         }
+        scheduleSave()
     }
 
     private func clearPlayback() {
+        mediaStarted = false
+        resume = nil
         currentIndex = nil
         currentTime = 0
         duration = 0
@@ -486,7 +627,7 @@ final class PlayerModel: ObservableObject {
     }
 
     private func tick() {
-        guard let engine, currentIndex != nil else { return }
+        guard let engine, currentIndex != nil, mediaStarted else { return }
         if !isScrubbing {
             let time = engine.time()
             if abs(time - currentTime) > 0.05 {
@@ -509,6 +650,134 @@ final class PlayerModel: ObservableObject {
         if pictureInPicture, !aspectLocked, let size = engine.videoSize() {
             PiPController.shared.setAspect(size)
             aspectLocked = true
+        }
+        progressTick &+= 1
+        if progressTick % 4 == 0 {
+            storeProgress(force: false)
+        }
+    }
+
+    private var progressTick: UInt = 0
+
+    var currentPath: String? {
+        guard let currentIndex, playlist.indices.contains(currentIndex) else { return nil }
+        return playlist[currentIndex].url.path
+    }
+
+    private func rebindCurrent(path: String?) {
+        guard let path else { return }
+        currentIndex = playlist.firstIndex { $0.url.path == path }
+    }
+
+    private func markCurrentFinished() {
+        guard let path = currentPath else { return }
+        var mark = progress[path] ?? WatchProgress(position: currentTime, duration: duration, finished: true)
+        mark.finished = true
+        if duration > 0 {
+            mark.duration = duration
+            mark.position = duration
+        }
+        progress[path] = mark
+    }
+
+    private func keepWindowFromVideoSize() {
+        guard let saved = frameBeforePlay, let window = NSApp.mainWindow else { return }
+        let grown = window.frame.width > saved.width + 24 || window.frame.height > saved.height + 24
+        if grown {
+            window.setFrame(saved, display: true, animate: false)
+        }
+        let token = saved
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            guard let self, self.frameBeforePlay == token, let window = NSApp.mainWindow else { return }
+            let stillGrown = window.frame.width > token.width + 24 || window.frame.height > token.height + 24
+            if stillGrown {
+                window.setFrame(token, display: true, animate: false)
+            }
+            self.frameBeforePlay = nil
+        }
+    }
+
+    private func applyResume() {
+        guard let resume, resume.generation == playGeneration else { return }
+        engine?.setTime(resume.time)
+        currentTime = resume.time
+        let token = resume
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
+            guard let self, let still = self.resume, still.generation == token.generation else { return }
+            self.engine?.setTime(still.time)
+            self.currentTime = still.time
+            self.resume = nil
+        }
+    }
+
+    private func storeProgress(force: Bool) {
+        guard mediaStarted, let path = currentPath else { return }
+        var mark = progress[path] ?? WatchProgress(position: 0, duration: 0, finished: false)
+        if duration > 0 { mark.duration = duration }
+        mark.position = currentTime
+        if mark.finished, duration > 0, currentTime < duration - 8 {
+            mark.finished = false
+        }
+        let changed = progress[path] != mark
+        if changed {
+            progress[path] = mark
+        }
+        if force || (changed && abs(mark.position - lastStoredPosition) > 1) {
+            lastStoredPosition = mark.position
+            scheduleSave()
+        }
+    }
+
+    private func scheduleSave() {
+        saveWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.writeLibrary()
+        }
+        saveWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+    }
+
+    private var libraryURL: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
+        return base.appendingPathComponent("Lumiere", isDirectory: true).appendingPathComponent("library.json")
+    }
+
+    private struct LibrarySnapshot: Codable {
+        var paths: [String]
+        var currentPath: String?
+        var progress: [String: WatchProgress]
+    }
+
+    private func loadLibrary() {
+        let url = libraryURL
+        guard let data = try? Data(contentsOf: url),
+              let snapshot = try? JSONDecoder().decode(LibrarySnapshot.self, from: data) else { return }
+        progress = snapshot.progress
+        playlist = snapshot.paths.map { MediaItem(url: URL(fileURLWithPath: $0)) }
+        if let current = snapshot.currentPath,
+           let index = playlist.firstIndex(where: { $0.url.path == current }) {
+            currentIndex = index
+            if let mark = progress[current] {
+                currentTime = mark.finished ? 0 : mark.position
+                duration = mark.duration
+            }
+        }
+    }
+
+    private func writeLibrary() {
+        let snapshot = LibrarySnapshot(
+            paths: playlist.map(\.url.path),
+            currentPath: currentPath,
+            progress: progress
+        )
+        let url = libraryURL
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let data = try JSONEncoder().encode(snapshot)
+            try data.write(to: url, options: .atomic)
+        } catch {
+            // Список останется в памяти до следующей попытки.
         }
     }
 
