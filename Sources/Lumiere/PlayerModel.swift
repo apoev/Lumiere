@@ -29,6 +29,11 @@ struct WatchProgress: Codable, Equatable {
     var finished: Bool
 }
 
+enum CornerReadout: Equatable {
+    case time
+    case volume
+}
+
 struct PlaybackCue: Equatable {
     enum Kind: Equatable {
         case play
@@ -50,6 +55,7 @@ final class PlayerModel: ObservableObject {
     static weak var current: PlayerModel?
     static let skipSeconds: Double = 10
     static let rates: [Float] = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3]
+    static let quickRates: [Float] = [1, 1.5, 2]
     static let playlistColumnWidth: CGFloat = 280
 
     @Published var playlist: [MediaItem] = []
@@ -62,10 +68,15 @@ final class PlayerModel: ObservableObject {
     @Published var volume: Int
     @Published var muted = false
     @Published var hasVideo = false
+    /// Пока новый ролик не нарисовал свой кадр, прошлый не показываем.
+    @Published var awaitingPicture = false
+    @Published private(set) var missingPaths: Set<String> = []
     @Published var pictureInPicture = false
     @Published var showPlaylist = true
     @Published var controlsVisible = true
     @Published var isScrubbing = false
+    /// Время или громкость, пока пользователь перематывает или меняет звук.
+    @Published var cornerReadout: CornerReadout?
     @Published var status: String?
     @Published var vlcMissing = false
     @Published var playbackCue: PlaybackCue?
@@ -73,6 +84,10 @@ final class PlayerModel: ObservableObject {
     let engine: VLCEngine?
     private var keyMonitor: Any?
     private var scrollMonitor: Any?
+    private var volumeScrollRemainder: CGFloat = 0
+    private var suppressStopUntil = Date.distantPast
+    private var reachedEnd = false
+    private var brokenSkip: DispatchWorkItem?
     private var timer: Timer?
     private var hideWork: DispatchWorkItem?
     private var activity: NSObjectProtocol?
@@ -95,6 +110,7 @@ final class PlayerModel: ObservableObject {
     private var lastSeekSentAt = Date.distantPast
     private var lastSeekSent = -1.0
     private var cueClear: DispatchWorkItem?
+    private var readoutClear: DispatchWorkItem?
     private var trustPlayingUntil = Date.distantPast
 
     private enum Keys {
@@ -230,7 +246,7 @@ final class PlayerModel: ObservableObject {
         }
     }
 
-    func play(index: Int) {
+    func play(index: Int, resumeAt: Double? = nil) {
         guard let engine, playlist.indices.contains(index) else { return }
         storeProgress(force: true)
         frameBeforePlay = NSApp.mainWindow?.frame
@@ -242,8 +258,18 @@ final class PlayerModel: ObservableObject {
         status = nil
         hasVideo = false
         mediaStarted = true
+        reachedEnd = false
+        brokenSkip?.cancel()
         let path = playlist[index].url.path
-        if let mark = progress[path], !mark.finished, mark.position > 3 {
+        if let resumeAt {
+            if resumeAt > 0.35 {
+                resume = (generation, resumeAt)
+                currentTime = resumeAt
+            } else {
+                resume = nil
+                currentTime = 0
+            }
+        } else if let mark = progress[path], !mark.finished, mark.position > 3 {
             resume = (generation, mark.position)
             currentTime = mark.position
         } else {
@@ -251,6 +277,22 @@ final class PlayerModel: ObservableObject {
             currentTime = 0
         }
         duration = progress[path]?.duration ?? 0
+        suppressStopUntil = Date().addingTimeInterval(0.8)
+        if !FileManager.default.fileExists(atPath: path) {
+            engine.clearPicture()
+            isPlaying = false
+            hasVideo = false
+            awaitingPicture = false
+            currentTime = 0
+            duration = 0
+            status = "Файл не найден"
+            refreshMissing()
+            pokeControls()
+            scheduleSave()
+            scheduleSkipBroken(generation: generation, from: index)
+            return
+        }
+        awaitingPicture = true
         engine.play(url: playlist[index].url)
         applyPreferences()
         isPlaying = true
@@ -260,10 +302,20 @@ final class PlayerModel: ObservableObject {
             guard let self, self.playGeneration == generation else { return }
             self.applyPreferences()
         }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            guard let self, self.playGeneration == generation, self.awaitingPicture, !self.hasVideo else { return }
+            self.awaitingPicture = false
+        }
     }
 
     func togglePlay(announce: Bool = true) {
         guard engine != nil else { return }
+        if reachedEnd, let currentIndex {
+            let time = (duration > 1 && currentTime >= duration - 1.2) ? 0 : currentTime
+            play(index: currentIndex, resumeAt: time)
+            if announce { flashCue(.play) }
+            return
+        }
         if let currentIndex, !mediaStarted {
             play(index: currentIndex)
             if announce { flashCue(.play) }
@@ -282,30 +334,58 @@ final class PlayerModel: ObservableObject {
         pokeControls()
     }
 
+    var canPlayNext: Bool {
+        guard let currentIndex else { return false }
+        return nextLiving(after: currentIndex, step: 1) != nil
+    }
+
+    var canPlayPrevious: Bool {
+        guard let currentIndex else { return false }
+        if currentTime > 3, !isMissing(currentIndex) { return true }
+        return nextLiving(after: currentIndex, step: -1) != nil
+    }
+
     func playAdjacent(_ delta: Int) {
-        guard let currentIndex else { return }
-        let target = currentIndex + delta
-        guard playlist.indices.contains(target) else { return }
+        guard let currentIndex, let target = nextLiving(after: currentIndex, step: delta) else { return }
         play(index: target)
     }
 
     func next() {
-        guard let currentIndex else { return }
-        let next = currentIndex + 1
-        guard playlist.indices.contains(next) else { return }
-        play(index: next)
+        playAdjacent(1)
     }
 
     func previous() {
-        if currentTime > 3 {
+        if currentTime > 3, let currentIndex, !isMissing(currentIndex) {
             seek(to: 0)
             return
         }
-        guard let currentIndex, currentIndex > 0 else {
-            seek(to: 0)
-            return
+        playAdjacent(-1)
+    }
+
+    private func isMissing(_ index: Int) -> Bool {
+        guard playlist.indices.contains(index) else { return true }
+        return !FileManager.default.fileExists(atPath: playlist[index].url.path)
+    }
+
+    private func nextLiving(after index: Int, step: Int) -> Int? {
+        guard step != 0 else { return nil }
+        var cursor = index + step
+        while playlist.indices.contains(cursor) {
+            if !isMissing(cursor) { return cursor }
+            cursor += step
         }
-        play(index: currentIndex - 1)
+        return nil
+    }
+
+    private func scheduleSkipBroken(generation: Int, from index: Int) {
+        brokenSkip?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.playGeneration == generation, self.currentIndex == index else { return }
+            guard let next = self.nextLiving(after: index, step: 1) else { return }
+            self.play(index: next)
+        }
+        brokenSkip = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
     }
 
     func remove(at index: Int) {
@@ -327,7 +407,30 @@ final class PlayerModel: ObservableObject {
     func clearPlaylist() {
         storeProgress(force: true)
         playlist = []
+        missingPaths = []
         clearPlayback()
+        scheduleSave()
+    }
+
+    func refreshMissing() {
+        let missing = Set(playlist.map(\.url.path).filter { !FileManager.default.fileExists(atPath: $0) })
+        if missing != missingPaths {
+            missingPaths = missing
+        }
+    }
+
+    func removeMissing() {
+        let current = currentPath
+        let currentMissing = current.map { !FileManager.default.fileExists(atPath: $0) } ?? false
+        playlist.removeAll { !FileManager.default.fileExists(atPath: $0.url.path) }
+        missingPaths = []
+        if playlist.isEmpty {
+            clearPlayback()
+        } else if currentMissing {
+            play(index: 0)
+        } else if let current {
+            currentIndex = playlist.firstIndex { $0.url.path == current }
+        }
         scheduleSave()
     }
 
@@ -370,6 +473,7 @@ final class PlayerModel: ObservableObject {
         resume = nil
         currentTime = target
         deliverSeek(target)
+        showCornerReadout(.time)
         pokeControls()
     }
 
@@ -405,6 +509,7 @@ final class PlayerModel: ObservableObject {
         if !isScrubbing { pokeControls() }
         currentTime = target
         isScrubbing = true
+        showCornerReadout(.time)
         if Date().timeIntervalSince(lastSeekSentAt) >= 0.1 {
             deliverSeek(target)
         }
@@ -462,13 +567,44 @@ final class PlayerModel: ObservableObject {
         }
         engine?.setVolume(clamped)
         UserDefaults.standard.set(clamped, forKey: Keys.volume)
+        showCornerReadout(.volume)
         pokeControls()
+    }
+
+    /// Свайп вверх увеличивает громкость. Инверсия в настройках переворачивает направление.
+    func changeVolume(byScroll delta: CGFloat) {
+        volumeScrollRemainder += delta / 4
+        let steps = Int(volumeScrollRemainder.rounded(.towardZero))
+        guard steps != 0 else { return }
+        volumeScrollRemainder -= CGFloat(steps)
+        setVolume(volume + steps)
+    }
+
+    func revealInFinder(_ url: URL) {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            status = "Файл не найден"
+            return
+        }
+        status = nil
+        NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
     func toggleMute() {
         muted.toggle()
         engine?.setMuted(muted)
+        showCornerReadout(.volume)
         pokeControls()
+    }
+
+    private func showCornerReadout(_ kind: CornerReadout) {
+        readoutClear?.cancel()
+        cornerReadout = kind
+        let work = DispatchWorkItem { [weak self] in
+            guard self?.cornerReadout == kind else { return }
+            self?.cornerReadout = nil
+        }
+        readoutClear = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9, execute: work)
     }
 
     func setPictureInPicture(_ enabled: Bool) {
@@ -627,46 +763,72 @@ final class PlayerModel: ObservableObject {
         let dy = (event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.deltaY) * scale
         let overTimeline = point.y < 140
         let horizontal = abs(dx) >= abs(dy) && abs(dx) >= 0.4
-        let delta: CGFloat
-        if horizontal {
-            // Жест вправо — вперёд, независимо от «естественной» прокрутки системы.
-            delta = event.isDirectionInvertedFromDevice ? dx : -dx
-        } else if (overTimeline || isPip), abs(dy) >= 0.4 {
-            delta = dy
-        } else {
-            return false
-        }
         let direction: CGFloat = AppSettings.shared.invertScroll ? -1 : 1
-        scrub(byScroll: delta * direction)
+        if horizontal {
+            guard mediaStarted, duration > 0 else { return false }
+            // Жест вправо — вперёд, независимо от «естественной» прокрутки системы.
+            let fingerRight = event.isDirectionInvertedFromDevice ? dx : -dx
+            scrub(byScroll: fingerRight * direction)
+            return true
+        }
+        guard abs(dy) >= 0.4 else { return false }
+        // У таймлайна основного окна вертикаль по-прежнему перематывает.
+        // В мини-плеере вверх-вниз — громкость, как на большом экране.
+        if overTimeline, !isPip, mediaStarted, duration > 0 {
+            scrub(byScroll: dy * direction)
+            return true
+        }
+        // deltaY: 1 — свайп вверх, пока система не перевернула жест. Инверсия настройки меняет это.
+        let fingerUp = event.isDirectionInvertedFromDevice ? -dy : dy
+        changeVolume(byScroll: fingerUp * direction)
         return true
     }
 
     private func handle(_ event: EngineEvent) {
         switch event {
         case .ended:
+            if Date() < suppressStopUntil { return }
             // Смена файла тоже шлёт EndReached. Короткое окно после старта — это ещё прошлый ролик.
             guard Date().timeIntervalSince(startedAt) > 0.6 else { return }
             startedAt = Date()
             markCurrentFinished()
             isPlaying = false
-            if let currentIndex, playlist.indices.contains(currentIndex + 1) {
-                play(index: currentIndex + 1)
+            if let currentIndex, let next = nextLiving(after: currentIndex, step: 1) {
+                play(index: next)
             } else {
+                reachedEnd = true
                 pokeControls()
                 scheduleSave()
             }
         case .failed:
+            suppressStopUntil = Date().addingTimeInterval(0.8)
+            engine?.clearPicture()
+            awaitingPicture = false
+            hasVideo = false
             isPlaying = false
             status = "Не удалось воспроизвести \(currentTitle ?? "файл")"
             pokeControls()
+            if let currentIndex {
+                scheduleSkipBroken(generation: playGeneration, from: currentIndex)
+            }
         case .playing:
+            reachedEnd = false
             isPlaying = true
             applyPreferences()
             applyResume()
             keepWindowFromVideoSize()
             updateActivity()
-        case .paused, .stopped:
+        case .paused:
+            if Date() < suppressStopUntil { return }
             isPlaying = false
+            updateActivity()
+            pokeControls()
+        case .stopped:
+            if Date() < suppressStopUntil { return }
+            isPlaying = false
+            if duration > 1, currentTime >= duration - 1.2 {
+                reachedEnd = true
+            }
             updateActivity()
             pokeControls()
         }
@@ -710,6 +872,7 @@ final class PlayerModel: ObservableObject {
                 play(index: firstIndex)
             }
         }
+        refreshMissing()
         scheduleSave()
     }
 
@@ -721,8 +884,12 @@ final class PlayerModel: ObservableObject {
         duration = 0
         isPlaying = false
         hasVideo = false
+        awaitingPicture = false
+        reachedEnd = false
+        brokenSkip?.cancel()
         status = nil
-        engine?.pause()
+        suppressStopUntil = Date().addingTimeInterval(0.8)
+        engine?.clearPicture()
         updateActivity()
         pokeControls()
     }
@@ -742,10 +909,14 @@ final class PlayerModel: ObservableObject {
     }
 
     private func tick() {
+        progressTick &+= 1
+        if showPlaylist, progressTick % 8 == 0 {
+            refreshMissing()
+        }
         guard let engine, currentIndex != nil, mediaStarted else { return }
         let time = engine.time()
         let holding = isScrubbing || Date() < scrubHoldUntil
-        if !holding {
+        if !holding, !reachedEnd {
             if abs(time - currentTime) > 0.05 {
                 currentTime = time
             }
@@ -767,11 +938,13 @@ final class PlayerModel: ObservableObject {
         if video != hasVideo {
             hasVideo = video
         }
+        if video, awaitingPicture {
+            awaitingPicture = false
+        }
         if pictureInPicture, !aspectLocked, let size = engine.videoSize() {
             PiPController.shared.setAspect(size)
             aspectLocked = true
         }
-        progressTick &+= 1
         if progressTick % 4 == 0 {
             storeProgress(force: false)
         }

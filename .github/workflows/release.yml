@@ -1,0 +1,70 @@
+# После пуша в main собирает Lumiere.app и публикует zip на GitHub Releases.
+# Установленные копии забирают его через «Проверить обновления».
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Sources/**"
+      - "Scripts/**"
+      - "Support/**"
+      - "Resources/**"
+      - "Info.plist"
+      - "Package.swift"
+      - "project.yml"
+      - "icon.png"
+      - ".github/workflows/release.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: lumiere-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Require Apple Silicon
+        run: |
+          set -euo pipefail
+          arch="$(uname -m)"
+          if [[ "$arch" != "arm64" ]]; then
+            echo "Нужен arm64-раннер, сейчас ${arch}."
+            exit 1
+          fi
+
+      - name: Install VLC 3.0.24
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 --retry-delay 2 -o /tmp/vlc.dmg \
+            "https://download.videolan.org/pub/videolan/vlc/3.0.24/macosx/vlc-3.0.24-arm64.dmg"
+          rm -rf /tmp/vlc-mount
+          mkdir -p /tmp/vlc-mount
+          hdiutil attach /tmp/vlc.dmg -nobrowse -noverify -noautoopen -mountpoint /tmp/vlc-mount
+          trap 'hdiutil detach /tmp/vlc-mount >/dev/null 2>&1 || true' EXIT
+          app="$(find /tmp/vlc-mount -maxdepth 2 -type d -name 'VLC.app' | head -1)"
+          test -n "$app"
+          rm -rf /Applications/VLC.app
+          ditto "$app" /Applications/VLC.app
+          xattr -cr /Applications/VLC.app || true
+          test -f /Applications/VLC.app/Contents/MacOS/lib/libvlc.dylib
+          test -d /Applications/VLC.app/Contents/MacOS/include
+
+      - name: Build and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LUMIERE_SKIP_INSTALL: "1"
+        run: |
+          set -euo pipefail
+          git fetch --tags --force origin
+          ./Scripts/release.sh

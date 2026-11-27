@@ -49,7 +49,7 @@ struct PlayerScreen: View {
                 if model.currentIndex == nil {
                     emptyState
                 } else {
-                    if !model.hasVideo && model.duration > 0 {
+                    if !model.hasVideo, !model.awaitingPicture, model.duration > 0 {
                         audioState
                     }
                     StageClicks(
@@ -86,6 +86,11 @@ struct PlayerScreen: View {
                 PlaybackCueOverlay(cue: cue)
                     .id(cue.token)
             }
+            CornerReadoutBadge(model: model)
+                .padding(.top, 12)
+                .padding(.trailing, 16)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                .allowsHitTesting(false)
         }
         .onContinuousHover { phase in
             if case .active = phase {
@@ -172,7 +177,7 @@ struct PlayerScreen: View {
             GeometryReader { geo in
             ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
-                IconButton(system: "backward.end.fill", help: "Предыдущий") {
+                IconButton(system: "backward.end.fill", help: "Предыдущий", enabled: model.canPlayPrevious) {
                     model.previous()
                 }
                 IconButton(system: "gobackward.10", help: "Назад на 10 секунд", size: 20) {
@@ -192,10 +197,10 @@ struct PlayerScreen: View {
                 IconButton(system: "goforward.10", help: "Вперёд на 10 секунд", size: 20) {
                     model.seek(by: PlayerModel.skipSeconds)
                 }
-                IconButton(system: "forward.end.fill", help: "Следующий") {
+                IconButton(system: "forward.end.fill", help: "Следующий", enabled: model.canPlayNext) {
                     model.next()
                 }
-                speedMenu
+                QuickRateButtons(model: model)
                 Button {
                     model.toggleMute()
                 } label: {
@@ -241,34 +246,9 @@ struct PlayerScreen: View {
         )
     }
 
-    private var speedMenu: some View {
-        Menu {
-            ForEach(PlayerModel.rates, id: \.self) { rate in
-                Button {
-                    model.setRate(rate)
-                } label: {
-                    if abs(model.rate - rate) < 0.01 {
-                        Label(formatRate(rate), systemImage: "checkmark")
-                    } else {
-                        Text(formatRate(rate))
-                    }
-                }
-            }
-        } label: {
-            Text(formatRate(model.rate))
-                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                .frame(minWidth: 52)
-        }
-        .menuStyle(.borderlessButton)
-        .frame(width: 72)
-        .help("Скорость")
-    }
-
     private var playlist: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                Text("Плейлист")
-                    .font(.system(size: 13, weight: .semibold))
                 Text("\(model.playlist.count)")
                     .font(.system(size: 12, weight: .medium, design: .rounded))
                     .foregroundStyle(playlistSecondary)
@@ -304,6 +284,14 @@ struct PlayerScreen: View {
                 .buttonStyle(.plain)
                 .help("Добавить папку")
                 Button {
+                    model.removeMissing()
+                } label: {
+                    Image(systemName: "xmark.circle")
+                }
+                .buttonStyle(.plain)
+                .disabled(model.missingPaths.isEmpty)
+                .help("Удалить отсутствующие")
+                Button {
                     model.clearPlaylist()
                 } label: {
                     Image(systemName: "trash")
@@ -323,6 +311,7 @@ struct PlayerScreen: View {
             .padding(.top, 16)
             .padding(.bottom, 10)
             .foregroundStyle(playlistPrimary)
+            .onAppear { model.refreshMissing() }
 
             if model.playlist.isEmpty {
                 VStack(spacing: 8) {
@@ -376,9 +365,12 @@ struct PlayerScreen: View {
             path: item.url.path,
             isCurrent: index == model.currentIndex,
             isPlaying: index == model.currentIndex && model.isPlaying,
-            fraction: model.watchedFraction(for: item.url)
+            fraction: model.watchedFraction(for: item.url),
+            missing: model.missingPaths.contains(item.url.path)
         ) {
             model.play(index: index)
+        } onReveal: {
+            model.revealInFinder(item.url)
         } onRemove: {
             model.remove(at: index)
         } onDrag: {
@@ -395,7 +387,7 @@ struct PlayerScreen: View {
                 .shadow(color: Color.lumiereAccent.opacity(0.45), radius: 24)
             Text("Перетащите видео сюда")
                 .font(.system(size: 20, weight: .semibold))
-            Text("Двойной щелчок — на весь экран. Свайп по таймлайну — перемотка. Пробел — пауза, стрелки — 10 секунд.")
+            Text("Двойной щелчок — на весь экран. Свайп вправо — перемотка, вверх — громче. Пробел — пауза, стрелки — 10 секунд.")
                 .font(.system(size: 12))
                 .foregroundStyle(.white.opacity(0.5))
                 .multilineTextAlignment(.center)
@@ -501,7 +493,7 @@ struct PiPOverlay: View {
             PiPDragSurface { inside in
                 pointerInside = inside
             }
-            if !model.hasVideo, model.currentIndex != nil {
+            if !model.hasVideo, !model.awaitingPicture, model.currentIndex != nil {
                 Image(systemName: "waveform")
                     .font(.system(size: 28))
                     .foregroundStyle(Color.lumiereAccent)
@@ -534,6 +526,11 @@ struct PiPOverlay: View {
                 PlaybackCueOverlay(cue: cue)
                     .id(cue.token)
             }
+            CornerReadoutBadge(model: model)
+                .padding(.top, 12)
+                .padding(.trailing, 42)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                .allowsHitTesting(false)
         }
         .environment(\.colorScheme, .dark)
         .foregroundStyle(.white)
@@ -572,7 +569,7 @@ struct PiPOverlay: View {
                         .frame(width: 26, height: 26)
                 }
                 .buttonStyle(.plain)
-                .disabled((model.currentIndex ?? 0) == 0)
+                .disabled(!model.canPlayPrevious)
                 .help("Предыдущее видео")
                 Button {
                     model.togglePlay()
@@ -590,7 +587,7 @@ struct PiPOverlay: View {
                         .frame(width: 26, height: 26)
                 }
                 .buttonStyle(.plain)
-                .disabled(model.currentIndex == nil || model.currentIndex == model.playlist.count - 1)
+                .disabled(!model.canPlayNext)
                 .help("Следующее видео")
                 Button {
                     model.seek(by: -PlayerModel.skipSeconds)
@@ -610,19 +607,7 @@ struct PiPOverlay: View {
                 }
                 .buttonStyle(.plain)
                 .help("Вперёд на 10 секунд")
-                Menu {
-                    ForEach(PlayerModel.rates, id: \.self) { rate in
-                        Button(formatRate(rate)) { model.setRate(rate) }
-                    }
-                } label: {
-                    Text(formatRate(model.rate))
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white)
-                        .frame(minWidth: 44)
-                }
-                .menuStyle(.borderlessButton)
-                .frame(width: 64)
-                .help("Скорость")
+                QuickRateButtons(model: model)
                 Text(formatTime(model.currentTime))
                     .font(.system(size: 11, weight: .medium, design: .monospaced))
                     .foregroundStyle(.white)
@@ -650,6 +635,35 @@ struct PiPOverlay: View {
     }
 }
 
+private struct CornerReadoutBadge: View {
+    @ObservedObject var model: PlayerModel
+
+    var body: some View {
+        Group {
+            if let readout = model.cornerReadout {
+                Text(label(readout))
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(Capsule(style: .continuous).fill(Color.black.opacity(0.62)))
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.15), value: model.cornerReadout)
+    }
+
+    private func label(_ readout: CornerReadout) -> String {
+        switch readout {
+        case .time:
+            return formatTime(model.currentTime)
+        case .volume:
+            return model.muted || model.volume == 0 ? "0%" : "\(model.volume)%"
+        }
+    }
+}
+
 private struct PlaybackCueOverlay: View {
     var cue: PlaybackCue
     @State private var expand = false
@@ -657,10 +671,10 @@ private struct PlaybackCueOverlay: View {
 
     var body: some View {
         Image(systemName: cue.symbol)
-            .font(.system(size: 30, weight: .semibold))
+            .font(.system(size: 45, weight: .semibold))
             .foregroundStyle(.white)
-            .offset(x: cue.kind == .play ? 2 : 0)
-            .frame(width: 74, height: 74)
+            .offset(x: cue.kind == .play ? 3 : 0)
+            .frame(width: 111, height: 111)
             .background(Circle().fill(Color.black.opacity(0.55)))
             .scaleEffect(expand ? 1.55 : 0.82)
             .opacity(fade ? 0 : 1)
@@ -724,7 +738,9 @@ private struct PlaylistRow: View {
     var isCurrent: Bool
     var isPlaying: Bool
     var fraction: Double
+    var missing: Bool
     var onPlay: () -> Void
+    var onReveal: () -> Void
     var onRemove: () -> Void
     var onDrag: () -> Void
     var onDrop: () -> Void
@@ -749,6 +765,20 @@ private struct PlaylistRow: View {
                     .truncationMode(.middle)
                     .foregroundStyle(primary.opacity(isCurrent ? 1 : 0.82))
                 Spacer(minLength: 4)
+                if missing {
+                    BrokenFolderMark()
+                        .foregroundStyle(primary)
+                        .help("Файла нет на диске")
+                } else {
+                    Button(action: onReveal) {
+                        Image(systemName: "folder")
+                            .font(.system(size: 13, weight: .semibold))
+                            .frame(width: 20, height: 20)
+                    }
+                    .buttonStyle(.plain)
+                    .opacity(hover ? 0.9 : 0.45)
+                    .help("Показать в Finder")
+                }
                 Button(action: onRemove) {
                     Image(systemName: "xmark")
                         .font(.system(size: 10, weight: .bold))
@@ -791,7 +821,8 @@ private struct PlaylistRow: View {
             onDrop()
             return true
         }
-        .help(path)
+        .opacity(missing ? 0.4 : 1)
+        .help(missing ? "Файла нет на диске" : path)
     }
 
     private var primary: Color {
@@ -805,10 +836,173 @@ private struct PlaylistRow: View {
     }
 }
 
+private struct QuickRateButtons: View {
+    @ObservedObject var model: PlayerModel
+
+    private var showsCustomRate: Bool {
+        !PlayerModel.quickRates.contains { abs(model.rate - $0) < 0.01 }
+    }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(PlayerModel.quickRates, id: \.self) { rate in
+                let selected = abs(model.rate - rate) < 0.01
+                Button {
+                    model.setRate(rate)
+                } label: {
+                    Text(formatRate(rate))
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .foregroundStyle(selected ? Color.black.opacity(0.88) : .white)
+                        .padding(.horizontal, 7)
+                        .frame(height: 26)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(selected ? Color.lumiereAccent : Color.white.opacity(0.12))
+                        )
+                }
+                .buttonStyle(.plain)
+                .help(formatRate(rate))
+            }
+            UpwardSpeedMenu(rate: model.rate, showsRate: showsCustomRate) { rate in
+                model.setRate(rate)
+            }
+            .frame(width: showsCustomRate ? 52 : 26, height: 26)
+            .help("Все скорости")
+        }
+    }
+}
+
+/// Меню скорости открывается вверх: панель стоит у нижнего края, вниз оно наезжает на кадр.
+private struct UpwardSpeedMenu: NSViewRepresentable {
+    var rate: Float
+    var showsRate: Bool
+    var onPick: (Float) -> Void
+
+    func makeNSView(context: Context) -> SpeedMenuButton {
+        let button = SpeedMenuButton(frame: NSRect(x: 0, y: 0, width: 26, height: 26))
+        button.onPick = onPick
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        return button
+    }
+
+    func updateNSView(_ button: SpeedMenuButton, context: Context) {
+        button.onPick = onPick
+        button.rate = rate
+        button.showsRate = showsRate
+        button.needsDisplay = true
+    }
+}
+
+final class SpeedMenuButton: NSView {
+    var rate: Float = 1 {
+        didSet { needsDisplay = true }
+    }
+    var showsRate = true {
+        didSet {
+            invalidateIntrinsicContentSize()
+            needsDisplay = true
+        }
+    }
+    var onPick: ((Float) -> Void)?
+
+    override var isFlipped: Bool { false }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: showsRate ? 52 : 26, height: 26)
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for value in PlayerModel.rates {
+            let item = NSMenuItem(title: formatRate(value), action: #selector(choose(_:)), keyEquivalent: "")
+            item.target = self
+            item.isEnabled = true
+            item.state = abs(value - rate) < 0.01 ? .on : .off
+            item.representedObject = NSNumber(value: value)
+            menu.addItem(item)
+        }
+        guard let bottom = menu.items.last else { return }
+        menu.popUp(positioning: bottom, at: NSPoint(x: 0, y: bounds.height + 6), in: self)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let capsule = NSBezierPath(roundedRect: bounds, xRadius: bounds.height / 2, yRadius: bounds.height / 2)
+        NSColor.white.withAlphaComponent(0.12).setFill()
+        capsule.fill()
+
+        let quick = PlayerModel.quickRates.contains { abs(rate - $0) < 0.01 }
+        if showsRate || !quick {
+            let font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+            let rounded = NSFont(descriptor: font.fontDescriptor.withDesign(.rounded) ?? font.fontDescriptor, size: 12) ?? font
+            let text = formatRate(rate) as NSString
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: rounded,
+                .foregroundColor: NSColor.white
+            ]
+            let size = text.size(withAttributes: attrs)
+            text.draw(
+                in: NSRect(
+                    x: (bounds.width - size.width) / 2,
+                    y: (bounds.height - size.height) / 2,
+                    width: size.width,
+                    height: size.height
+                ),
+                withAttributes: attrs
+            )
+            return
+        }
+
+        let chevron = NSBezierPath()
+        let midX = bounds.midX
+        let midY = bounds.midY - 0.5
+        chevron.move(to: NSPoint(x: midX - 4.5, y: midY - 1.5))
+        chevron.line(to: NSPoint(x: midX, y: midY + 2.5))
+        chevron.line(to: NSPoint(x: midX + 4.5, y: midY - 1.5))
+        chevron.lineWidth = 1.6
+        chevron.lineCapStyle = .round
+        chevron.lineJoinStyle = .round
+        NSColor.white.setStroke()
+        chevron.stroke()
+    }
+
+    @objc private func choose(_ sender: NSMenuItem) {
+        guard let number = sender.representedObject as? NSNumber else { return }
+        onPick?(number.floatValue)
+    }
+}
+
+private struct BrokenFolderMark: View {
+    var body: some View {
+        ZStack {
+            Image(systemName: "folder")
+                .font(.system(size: 13, weight: .semibold))
+                .overlay {
+                    GeometryReader { geo in
+                        Rectangle()
+                            .fill(Color.black)
+                            .frame(width: geo.size.width * 0.66, height: geo.size.height * 0.12)
+                            .position(x: geo.size.width * 0.5, y: geo.size.height * 0.395)
+                            .blendMode(.destinationOut)
+                    }
+                }
+                .compositingGroup()
+            Image(systemName: "xmark")
+                .font(.system(size: 6.5, weight: .bold))
+                .offset(x: 0.5)
+        }
+        .frame(width: 20, height: 20)
+    }
+}
+
 private struct IconButton: View {
     var system: String
     var help: String
     var size: CGFloat = 14
+    var enabled: Bool = true
     var action: () -> Void
 
     var body: some View {
@@ -819,6 +1013,8 @@ private struct IconButton: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.35)
         .help(help)
     }
 }

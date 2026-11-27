@@ -112,12 +112,15 @@ swiftc_overlay \
   "${SOURCES[@]}"
 
 PLIST="$ROOT/Info.plist"
-VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST")"
-IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
-MAJOR="${MAJOR:-1}"
-MINOR="${MINOR:-0}"
-PATCH="${PATCH:-0}"
-NEXT_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
+if [[ -n "${LUMIERE_VERSION:-}" ]]; then
+  NEXT_VERSION="$LUMIERE_VERSION"
+else
+  NEXT_VERSION="$(bash "$ROOT/Scripts/next-version.sh")"
+fi
+if [[ ! "$NEXT_VERSION" =~ ^[0-9]+(\.[0-9]+){1,3}$ ]]; then
+  echo "Некорректная версия: $NEXT_VERSION"
+  exit 1
+fi
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $NEXT_VERSION" "$PLIST"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $NEXT_VERSION" "$PLIST"
 cp "$PLIST" "$APP/Contents/Info.plist"
@@ -140,15 +143,21 @@ codesign --force --sign - "$APP" >/dev/null 2>&1 || true
 # Finder часто не берёт только CFBundleIconFile — кастомная иконка ПОСЛЕ codesign.
 "$SET_ICON_TOOL" "$APP" "$ROOT/Resources/AppIcon.icns"
 
-/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP" >/dev/null 2>&1 || true
-/usr/bin/osascript -e "tell application \"Finder\" to update POSIX file \"$APP\"" >/dev/null 2>&1 || true
-
 FIX_SRC="$ROOT/Scripts/разрешить-запуск.command"
 FIX_DST="$ROOT/build/разрешить-запуск.command"
 if [[ -f "$FIX_SRC" ]]; then
   cp "$FIX_SRC" "$FIX_DST"
   chmod +x "$FIX_DST"
 fi
+
+if [[ "${LUMIERE_SKIP_INSTALL:-}" == "1" ]]; then
+  echo "OK → $APP"
+  ls -la "$BIN"
+  exit 0
+fi
+
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP" >/dev/null 2>&1 || true
+/usr/bin/osascript -e "tell application \"Finder\" to update POSIX file \"$APP\"" >/dev/null 2>&1 || true
 
 INSTALLED="/Applications/Lumiere.app"
 echo "Копирую в Программы…"

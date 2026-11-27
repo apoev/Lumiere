@@ -187,7 +187,18 @@ final class VLCEngine {
         libvlc_media_player_set_nsobject(player, Unmanaged.passUnretained(canvas).toOpaque())
     }
 
+    /// Убирает последний кадр. Иначе при смене ролика или битом файле на экране остаётся прошлая картинка.
+    func clearPicture() {
+        libvlc_media_player_set_nsobject(player, nil)
+        libvlc_media_player_stop(player)
+        for subview in canvas.subviews {
+            subview.removeFromSuperview()
+        }
+    }
+
     func play(url: URL) {
+        clearPicture()
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
         attachDrawable()
         url.withUnsafeFileSystemRepresentation { representation in
             guard let representation else { return }

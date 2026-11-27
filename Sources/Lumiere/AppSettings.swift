@@ -43,7 +43,7 @@ final class AppSettings: ObservableObject {
         }
     }
 
-    /// Выключено: жест вправо перематывает вперёд. Включено — наоборот.
+    /// Выключено: жест вправо перематывает вперёд, вверх — громче. Включено — наоборот.
     @Published var invertScroll: Bool {
         didSet { UserDefaults.standard.set(invertScroll, forKey: Keys.invertScroll) }
     }
@@ -159,7 +159,7 @@ struct SettingsView: View {
                 Text("Прокрутка")
                     .font(.headline)
                 Toggle("Инвертировать направление", isOn: $settings.invertScroll)
-                Text("Выключено: скролл вправо перематывает вперёд.")
+                Text("Выключено: скролл вправо перематывает вперёд, свайп вверх делает громче.")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
